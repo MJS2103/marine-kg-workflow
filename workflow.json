@@ -1,0 +1,138 @@
+[
+  {
+    "name": "Marine Business Matcher",
+    "active": false,
+    "nodes": [
+      {
+        "name": "Watch Input CSV",
+        "type": "n8n-nodes-base.watch",
+        "typeVersion": 1,
+        "position": [250, 300],
+        "parameters": {
+          "path": "/path/to/watch/folder",
+          "fileFilter": "input.csv",
+          "watchFor": "new",
+          "options": {}
+        }
+      },
+      {
+        "name": "Read CSV File",
+        "type": "n8n-nodes-base.readBinaryFile",
+        "typeVersion": 1,
+        "position": [450, 300],
+        "parameters": {
+          "filePath": "={{$node[\"Watch Input CSV\"].json[\"path\"]}}",
+          "options": {}
+        }
+      },
+      {
+        "name": "Parse CSV to JSON",
+        "type": "n8n-nodes-base.spreadsheetFile",
+        "typeVersion": 1,
+        "position": [650, 300],
+        "parameters": {
+          "binaryPropertyName": "data",
+          "fileFormat": "csv",
+          "csvParseOptions": {
+            "headerRow": true,
+            "delimiter": ",",
+            "skipEmptyLines": true
+          }
+        }
+      },
+      {
+        "name": "Normalize Columns",
+        "type": "n8n-nodes-base.function",
+        "typeVersion": 1,
+        "position": [850, 300],
+        "parameters": {
+          "functionCode": "// Normalize CLEAN_NAME to clean_name and add match fields\nreturn items.map(item => {\n  const json = item.json;\n  json.clean_name = json.CLEAN_NAME || '';\n  delete json.CLEAN_NAME;\n  json.match_name = '';\n  json.match_description = '';\n  json.match_score = '';\n  return { json };\n});"
+        }
+      },
+      {
+        "name": "Strip Trailing Codes",
+        "type": "n8n-nodes-base.function",
+        "typeVersion": 1,
+        "position": [1050, 300],
+        "parameters": {
+          "functionCode": "// Strip trailing codes from clean_name\nreturn items.map(item => {\n  const json = item.json;\n  json.search_name = json.clean_name.replace(/\\s+[A-Za-z]*\\d+$/, '').trim();\n  return { json };\n});"
+        }
+      },
+      {
+        "name": "Split Rows for Rate Limit",
+        "type": "n8n-nodes-base.splitInBatches",
+        "typeVersion": 1,
+        "position": [1250, 300],
+        "parameters": {
+          "batchSize": 1
+        }
+      },
+      {
+        "name": "Google KG API",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 1,
+        "position": [1450, 300],
+        "parameters": {
+          "url": "https://kgsearch.googleapis.com/v1/entities:search",
+          "method": "GET",
+          "queryParametersUi": {
+            "parameter": [
+              { "name": "query", "value": "={{$json[\"search_name\"]}}" },
+              { "name": "limit", "value": "5" },
+              { "name": "key", "value": "={{$env.GOOGLE_API_KEY}}" }
+            ]
+          },
+          "responseFormat": "json",
+          "jsonParameters": true,
+          "options": {}
+        }
+      },
+      {
+        "name": "Filter & Score Candidates",
+        "type": "n8n-nodes-base.function",
+        "typeVersion": 1,
+        "position": [1650, 300],
+        "parameters": {
+          "functionCode": "// Filter & score candidates\nconst marineKeywords = [\"marine\",\"shipping\",\"boat\",\"vessel\",\"port\",\"harbor\",\"sea\"];\nconst BUSINESS_TYPES = new Set([\"Organization\",\"Corporation\",\"LocalBusiness\",\"Company\"]);\nconst DESC_KEYWORDS = [\"company\",\"shipping\",\"marine\",\"sea\"];\n\n// Simple fuzzy (you can replace with rapidfuzz in JS)\nfunction partialRatio(s1,s2){return s1.toLowerCase().includes(s2)?100:0;}\nfunction tokenSetRatio(a,b){const A=new Set(a.split(/\\s+/)),B=new Set(b.split(/\\s+/));const I=[...A].filter(x=>B.has(x)).length;return I?Math.floor(I*100/Math.max(A.size,B.size)):0;}\n\nreturn items.map(item=>{\n  const json = item.json;\n  const elements = json.body?.itemListElement||[];\n  const candidates = elements.map(el=>({\n    name: el.result?.name||'',\n    description: el.result?.description||'',\n    score: el.resultScore||0,\n    types: el.result['@type']||[]\n  })).filter(c=>!c.types.includes('Person'));\n\n  const scored = candidates.map(c=>{\n    const ind=marineKeywords.reduce((m,kw)=>Math.max(m,partialRatio(c.description,kw)),0);\n    const nm=tokenSetRatio(json.search_name.toLowerCase(),c.name.toLowerCase());\n    return {...c, industry_score:ind,name_score:nm};\n  }).filter(c=>c.industry_score>=60&&c.name_score>=60);\n\n  if(!scored.length) return { json };\n  scored.sort((a,b)=>b.industry_score+b.name_score - (a.industry_score+a.name_score));\n  const best=scored[0];\n  if(!best.types.some(t=>BUSINESS_TYPES.has(t))) return { json };\n  if(!DESC_KEYWORDS.some(k=>best.description.toLowerCase().includes(k))) return { json };\n\n  json.match_name=best.name;\n  json.match_description=best.description;\n  json.match_score=best.score;\n  return { json };\n});"
+        }
+      },
+      {
+        "name": "Wait 100ms",
+        "type": "n8n-nodes-base.wait",
+        "typeVersion": 1,
+        "position": [1850, 300],
+        "parameters": { "waitTime": 100 }
+      },
+      {
+        "name": "Merge Processed Rows",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 1,
+        "position": [2050, 300],
+        "parameters": { "mode": "passThrough", "mergeBy": "none", "propertyName": "json" }
+      },
+      {
+        "name": "Write Output CSV",
+        "type": "n8n-nodes-base.spreadsheetFile",
+        "typeVersion": 1,
+        "position": [2250, 300],
+        "parameters": {
+          "fileFormat": "csv",
+          "dataPropertyName": "json",
+          "options": {}
+        }
+      },
+      {
+        "name": "Write File to Disk",
+        "type": "n8n-nodes-base.writeBinaryFile",
+        "typeVersion": 1,
+        "position": [2450, 300],
+        "parameters": {
+          "filePath": "/path/to/watch/folder/marine_matches.csv",
+          "binaryPropertyName": "data"
+        }
+      }
+    ],
+    "connections": {},
+    "settings": {}
+  }
+]
